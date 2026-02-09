@@ -190,7 +190,7 @@ function svgToPng(svgElement) {
       img.onload = () => {
         clearTimeout(timeout);
         ctx.drawImage(img, 0, 0, width, height);
-        resolve({ data: canvas.toDataURL('image/png'), width: width });
+        resolve({ data: canvas.toDataURL('image/png'), width, height });
       };
 
       img.onerror = (e) => {
@@ -241,28 +241,37 @@ async function exportWord() {
         const img = document.createElement('img');
         img.src = item.data;
         img.width = item.width;
+        if (item.height) img.height = item.height;
         cloneSvgs[item.index].parentNode.replaceChild(img, cloneSvgs[item.index]);
       }
     });
 
     contentClone.querySelectorAll('svg').forEach(el => el.remove());
 
-    const wordStyles = `
-      <style>
-        body { font-family: 'Calibri', 'SimSun', sans-serif; font-size: 11pt; }
-        h1 { font-size: 24pt; color: #2e74b5; border-bottom: 2px solid #2e74b5; }
-        table { border-collapse: collapse; width: 100%; margin: 15px 0; }
-        th { background-color: #f2f2f2; border: 1px solid #999; padding: 8px; }
-        td { border: 1px solid #999; padding: 8px; }
-        img { display: block; margin: 10px auto; max-width: 100%; }
-        .mermaid { text-align: center; }
-      </style>
-    `;
+    if (!window.docx) {
+      throw new Error('docx 库未加载（请检查网络/CDN）。');
+    }
 
-    const fullHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8">${wordStyles}</head><body>${contentClone.innerHTML}</body></html>`;
+    btn.innerText = '转换内容...';
+    await new Promise(r => setTimeout(r, 30));
 
-    const converted = htmlDocx.asBlob(fullHtml);
-    saveAs(converted, 'markdown_export.docx');
+    const blocks = await htmlElementToDocxBlocks(contentClone);
+    if (!blocks.length) {
+      blocks.push(new window.docx.Paragraph({ text: '' }));
+    }
+
+    btn.innerText = '打包文档...';
+    await new Promise(r => setTimeout(r, 30));
+
+    const doc = new window.docx.Document({
+      sections: [{
+        properties: {},
+        children: blocks,
+      }],
+    });
+
+    const blob = await window.docx.Packer.toBlob(doc);
+    saveAs(blob, 'markdown_export.docx');
 
   } catch (e) {
     alert("导出出错: " + e.message);
@@ -270,4 +279,255 @@ async function exportWord() {
     btn.innerText = originalText;
     btn.disabled = false;
   }
+}
+
+function isElement(node) {
+  return node && node.nodeType === Node.ELEMENT_NODE;
+}
+
+function dataUrlToUint8Array(dataUrl) {
+  const match = /^data:([^;]+);base64,(.*)$/.exec(dataUrl || '');
+  if (!match) return null;
+  const base64 = match[2];
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+const __imageSizeCache = new Map();
+
+function getImageSizeFromDataUrl(dataUrl) {
+  if (!dataUrl) return Promise.resolve(null);
+  if (__imageSizeCache.has(dataUrl)) return __imageSizeCache.get(dataUrl);
+
+  const p = new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve({ width: img.naturalWidth || img.width, height: img.naturalHeight || img.height });
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+
+  __imageSizeCache.set(dataUrl, p);
+  return p;
+}
+
+function guessImageType(dataUrl) {
+  const match = /^data:([^;]+);base64,/.exec(dataUrl || '');
+  if (!match) return undefined;
+  const mime = match[1].toLowerCase();
+  if (mime.includes('png')) return 'png';
+  if (mime.includes('jpeg') || mime.includes('jpg')) return 'jpeg';
+  if (mime.includes('gif')) return 'gif';
+  if (mime.includes('webp')) return 'webp';
+  return undefined;
+}
+
+function splitTextToRuns(text, options = {}) {
+  const { TextRun } = window.docx;
+  const normalized = (text ?? '').replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const runs = [];
+  lines.forEach((line, idx) => {
+    runs.push(new TextRun({ text: line, ...options }));
+    if (idx < lines.length - 1) {
+      runs.push(new TextRun({ break: 1 }));
+    }
+  });
+  return runs;
+}
+
+function headingLevelForTag(tagName) {
+  const { HeadingLevel } = window.docx;
+  switch ((tagName || '').toUpperCase()) {
+    case 'H1': return HeadingLevel.HEADING_1;
+    case 'H2': return HeadingLevel.HEADING_2;
+    case 'H3': return HeadingLevel.HEADING_3;
+    case 'H4': return HeadingLevel.HEADING_4;
+    case 'H5': return HeadingLevel.HEADING_5;
+    case 'H6': return HeadingLevel.HEADING_6;
+    default: return undefined;
+  }
+}
+
+async function htmlElementToDocxBlocks(rootEl) {
+  const { Paragraph, Table, TableRow, TableCell, WidthType, ImageRun, AlignmentType, BorderStyle, TableLayoutType, TextRun } = window.docx;
+  const blocks = [];
+
+  const walkChildren = async (container, listContext = null) => {
+    const children = Array.from(container.childNodes || []);
+    for (const node of children) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text) {
+          blocks.push(new Paragraph({
+            children: [new window.docx.TextRun({ text })],
+            spacing: { after: 120 },
+          }));
+        }
+        continue;
+      }
+
+      if (!isElement(node)) continue;
+
+      const tag = node.tagName.toUpperCase();
+      if (tag === 'BR') {
+        blocks.push(new Paragraph({ text: '' }));
+        continue;
+      }
+
+      if (/^H[1-6]$/.test(tag)) {
+        const heading = headingLevelForTag(tag);
+        blocks.push(new Paragraph({
+          text: node.textContent || '',
+          heading,
+          spacing: { after: 180 },
+        }));
+        continue;
+      }
+
+      if (tag === 'P' || tag === 'DIV') {
+        const text = (node.innerText || node.textContent || '').trim();
+        if (text) {
+          blocks.push(new Paragraph({
+            children: splitTextToRuns(text),
+            spacing: { after: 120 },
+          }));
+        } else {
+          // 可能包含图片/表格等块级元素
+          await walkChildren(node, listContext);
+        }
+        continue;
+      }
+
+      if (tag === 'PRE') {
+        const code = (node.innerText || node.textContent || '').replace(/^\n+|\n+$/g, '');
+        if (code) {
+          blocks.push(new Paragraph({
+            children: splitTextToRuns(code, { font: 'Courier New' }),
+            spacing: { after: 180 },
+          }));
+        }
+        continue;
+      }
+
+      if (tag === 'UL' || tag === 'OL') {
+        const isOrdered = tag === 'OL';
+        const items = Array.from(node.children).filter(c => isElement(c) && c.tagName.toUpperCase() === 'LI');
+        let idx = 1;
+        for (const li of items) {
+          const text = (li.innerText || li.textContent || '').trim();
+          if (!text) continue;
+          blocks.push(new Paragraph({
+            text: isOrdered ? `${idx++}. ${text}` : text,
+            bullet: isOrdered ? undefined : { level: 0 },
+            spacing: { after: 60 },
+          }));
+        }
+        continue;
+      }
+
+      if (tag === 'IMG') {
+        const src = node.getAttribute('src') || '';
+        const bytes = dataUrlToUint8Array(src);
+        if (bytes) {
+          const natural = await getImageSizeFromDataUrl(src);
+          const widthAttr = parseInt(node.getAttribute('width') || '', 10);
+          const heightAttr = parseInt(node.getAttribute('height') || '', 10);
+
+          const naturalWidth = natural?.width || (Number.isFinite(widthAttr) ? widthAttr : 800);
+          const naturalHeight = natural?.height || (Number.isFinite(heightAttr) ? heightAttr : 450);
+
+          const MAX_WIDTH = 560;
+          const MIN_WIDTH = 120;
+          let targetWidth = Number.isFinite(widthAttr) ? widthAttr : naturalWidth;
+          targetWidth = Math.min(Math.max(targetWidth, MIN_WIDTH), MAX_WIDTH);
+
+          const ratio = naturalWidth > 0 ? (naturalHeight / naturalWidth) : 0.6;
+          const targetHeight = Math.max(60, Math.round(targetWidth * ratio));
+          const imageType = guessImageType(src);
+
+          blocks.push(new Paragraph({
+            alignment: AlignmentType.CENTER,
+            children: [
+              new ImageRun({
+                data: bytes,
+                transformation: { width: targetWidth, height: targetHeight },
+                type: imageType,
+              }),
+            ],
+            spacing: { after: 180 },
+          }));
+        }
+        continue;
+      }
+
+      if (tag === 'TABLE') {
+        // iOS Pages 对百分比宽度/自动布局兼容较差，容易把列挤到极窄导致中文逐字换行。
+        // 这里改用固定表格布局 + 固定列宽（DXA/twips）。
+        // Letter(8.5in) 宽 12240 twips；左右各 1in 边距(1440*2)后可用宽约 9360。
+        const TABLE_WIDTH_DXA = 9360;
+        const rows = [];
+        const trEls = Array.from(node.querySelectorAll('tr'));
+
+        const firstRowCells = trEls.length
+          ? Array.from(trEls[0].children).filter(c => ['TD', 'TH'].includes(c.tagName.toUpperCase()))
+          : [];
+        const tableColCount = Math.max(firstRowCells.length, 1);
+        const tableColWidth = Math.floor(TABLE_WIDTH_DXA / tableColCount);
+        const columnWidths = new Array(tableColCount).fill(tableColWidth);
+
+        for (const tr of trEls) {
+          const cellEls = Array.from(tr.children).filter(c => ['TD', 'TH'].includes(c.tagName.toUpperCase()));
+          const normalizedCells = [];
+
+          for (let i = 0; i < tableColCount; i++) {
+            const cellEl = cellEls[i];
+            const cellText = cellEl ? (cellEl.innerText || cellEl.textContent || '').trim() : '';
+            const isHeader = cellEl ? (cellEl.tagName.toUpperCase() === 'TH') : false;
+
+            normalizedCells.push(new TableCell({
+              width: { size: columnWidths[i], type: WidthType.DXA },
+              borders: {
+                top: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+                bottom: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+                left: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+                right: { style: BorderStyle.SINGLE, size: 1, color: '999999' },
+              },
+              children: [
+                new Paragraph({
+                  alignment: isHeader ? AlignmentType.CENTER : AlignmentType.LEFT,
+                  children: isHeader
+                    ? [new TextRun({ text: cellText, bold: true })]
+                    : [new TextRun({ text: cellText })],
+                  spacing: { after: 60 },
+                }),
+              ],
+            }));
+          }
+
+          const cells = normalizedCells;
+          if (cells.length) rows.push(new TableRow({ children: cells }));
+        }
+
+        if (rows.length) {
+          blocks.push(new Table({
+            // 多数渲染器（Pages/WPS）对表格整体宽度更偏好百分比；列宽用 tblGrid 明确指定。
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            layout: TableLayoutType.FIXED,
+            columnWidths,
+            rows,
+          }));
+          blocks.push(new Paragraph({ text: '' }));
+        }
+        continue;
+      }
+
+      // 兜底：继续向下找
+      await walkChildren(node, listContext);
+    }
+  };
+
+  await walkChildren(rootEl);
+  return blocks;
 }
