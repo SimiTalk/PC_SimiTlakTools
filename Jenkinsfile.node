@@ -3,5 +3,5 @@
 /* groovylint-disable-next-line CompileStatic, NoDef, VariableName, VariableTypeRequired */
 @Library('jenkins-ops-pipeline-library@main') _
 
-simitalkHomeCIPipeline codeType: 'github',
+simitalkHomeCIPipeline codeType: node',
                  packagePath: 'dist'
