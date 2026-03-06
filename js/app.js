@@ -61,29 +61,103 @@ const editor = CodeMirror.fromTextArea(document.getElementById("code"), {
 
 function normalizeMarkdownSource(source) {
   if (!source) return '';
-  let text = String(source);
+  const input = String(source);
 
-  // 兼容一种“非主流图片语法”
-  // [[img:https://...]] -> ![](https://...)
-  text = text.replace(/\[\[img:([^\]]+)\]\]/gi, (_m, url) => {
-    const normalizedUrl = String(url).trim();
-    return `![](${normalizedUrl})`;
+  const replaceOutsideBackticks = (line, replacer) => {
+    // 保留行内代码：`...` 或 ``...`` 等
+    let out = '';
+    let i = 0;
+    let inSpan = false;
+    let spanTicks = 0;
+    let segmentStart = 0;
+
+    const flushSegment = (end) => {
+      const seg = line.slice(segmentStart, end);
+      out += inSpan ? seg : replacer(seg);
+    };
+
+    while (i < line.length) {
+      if (line[i] !== '`') {
+        i++;
+        continue;
+      }
+
+      // count ticks
+      let j = i;
+      while (j < line.length && line[j] === '`') j++;
+      const tickCount = j - i;
+
+      // flush text before ticks
+      flushSegment(i);
+      out += line.slice(i, j);
+
+      if (!inSpan) {
+        inSpan = true;
+        spanTicks = tickCount;
+      } else if (tickCount === spanTicks) {
+        inSpan = false;
+        spanTicks = 0;
+      }
+
+      i = j;
+      segmentStart = i;
+    }
+
+    flushSegment(line.length);
+    return out;
+  };
+
+  const applyRewrites = (chunk) => {
+    let text = chunk;
+
+    // 兼容一种“非主流图片语法”
+    // [[img:https://...]] -> ![](https://...)
+    text = text.replace(/\[\[img:([^\]]+)\]\]/gi, (_m, url) => {
+      const normalizedUrl = String(url).trim();
+      return `![](${normalizedUrl})`;
+    });
+
+    // 兼容一种“悬浮提示”写法（类似 kramdown）
+    // [text](url){:title="..."} -> <a href="url" title="...">text</a>
+    // 说明：这是定向兼容，避免引入额外插件。
+    text = text.replace(
+      /\[([^\]]+)\]\(([^)\s]+)\)\{:\s*title\s*=\s*"([^"]*)"\s*\}/g,
+      (_m, label, url, title) => {
+        const safeLabel = String(label).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const safeUrl = String(url).replace(/"/g, '&quot;');
+        const safeTitle = String(title).replace(/"/g, '&quot;');
+        return `<a href="${safeUrl}" title="${safeTitle}">${safeLabel}</a>`;
+      }
+    );
+
+    return text;
+  };
+
+  // 关键：不要在 fenced code block（``` / ~~~）内做任何替换，避免示例代码被改写成 HTML。
+  const lines = input.replace(/\r\n/g, '\n').split('\n');
+  let inFence = false;
+  let fenceMarker = '';
+
+  const outLines = lines.map((rawLine) => {
+    const line = rawLine;
+    const fenceMatch = /^\s*(```+|~~~+)/.exec(line);
+    if (fenceMatch) {
+      const marker = fenceMatch[1];
+      if (!inFence) {
+        inFence = true;
+        fenceMarker = marker[0];
+      } else if (marker[0] === fenceMarker) {
+        inFence = false;
+        fenceMarker = '';
+      }
+      return line;
+    }
+
+    if (inFence) return line;
+    return replaceOutsideBackticks(line, applyRewrites);
   });
 
-  // 兼容一种“悬浮提示”写法（类似 kramdown）
-  // [text](url){:title="..."} -> <a href="url" title="...">text</a>
-  // 说明：这是定向兼容，避免引入额外插件。
-  text = text.replace(
-    /\[([^\]]+)\]\(([^)\s]+)\)\{:\s*title\s*=\s*"([^"]*)"\s*\}/g,
-    (_m, label, url, title) => {
-      const safeLabel = String(label).replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      const safeUrl = String(url).replace(/"/g, '&quot;');
-      const safeTitle = String(title).replace(/"/g, '&quot;');
-      return `<a href="${safeUrl}" title="${safeTitle}">${safeLabel}</a>`;
-    }
-  );
-
-  return text;
+  return outLines.join('\n');
 }
 
 function slugifyHeadingId(raw) {
@@ -373,6 +447,81 @@ function svgToPng(svgElement) {
   });
 }
 
+let __mathJaxPromise;
+
+function ensureMathJaxLoaded() {
+  if (__mathJaxPromise) return __mathJaxPromise;
+
+  __mathJaxPromise = new Promise((resolve, reject) => {
+    if (window.MathJax && window.MathJax.startup && window.MathJax.startup.promise) {
+      window.MathJax.startup.promise.then(resolve).catch(reject);
+      return;
+    }
+
+    // 配置必须在脚本加载前设置
+    window.MathJax = window.MathJax || {
+      tex: {
+        inlineMath: [['$', '$'], ['\\(', '\\)']],
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+      },
+      svg: {
+        // 使用路径缓存避免依赖字体，导出 PNG 更稳定
+        fontCache: 'none',
+      },
+    };
+
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js';
+    script.async = true;
+    script.onload = () => {
+      if (window.MathJax?.startup?.promise) {
+        window.MathJax.startup.promise.then(resolve).catch(reject);
+      } else {
+        resolve();
+      }
+    };
+    script.onerror = () => reject(new Error('MathJax 加载失败（请检查网络/CDN）。'));
+    document.head.appendChild(script);
+  });
+
+  return __mathJaxPromise;
+}
+
+function extractTexFromKatexElement(katexEl) {
+  if (!katexEl) return '';
+  // KaTeX 默认输出包含 MathML：annotation(encoding="application/x-tex") 存着原始 TeX
+  const ann = katexEl.querySelector('annotation[encoding="application/x-tex"]');
+  if (ann && ann.textContent) return ann.textContent.trim();
+  // 兜底：尝试从可见 HTML 文本取（可能不完整）
+  return (katexEl.textContent || '').trim();
+}
+
+async function texToPngViaMathJax(tex, { display, sandbox }) {
+  if (!tex) return null;
+  await ensureMathJaxLoaded();
+  if (!window.MathJax?.tex2svg) return null;
+
+  const wrapper = window.MathJax.tex2svg(tex, { display: !!display });
+  const svg = wrapper?.querySelector?.('svg');
+  if (!svg) return null;
+
+  // 放到 sandbox 里让尺寸可测
+  const host = document.createElement('div');
+  host.style.display = 'inline-block';
+  host.style.padding = '0';
+  host.style.margin = '0';
+  host.appendChild(svg);
+  (sandbox || document.body).appendChild(host);
+
+  try {
+    // 等一帧让布局稳定
+    await new Promise(r => requestAnimationFrame(() => r()));
+    return await svgToPng(svg);
+  } finally {
+    host.remove();
+  }
+}
+
 // 导出 Word 文档
 async function exportWord() {
   const btn = document.getElementById('btn-export-word');
@@ -412,6 +561,60 @@ async function exportWord() {
 
     contentClone.querySelectorAll('svg').forEach(el => el.remove());
 
+    // KaTeX：导出到 Word 时将公式转为图片，避免变成源码文本
+    const sandbox = document.createElement('div');
+    sandbox.style.position = 'fixed';
+    sandbox.style.left = '-10000px';
+    sandbox.style.top = '0';
+    sandbox.style.width = '900px';
+    sandbox.style.opacity = '0';
+    sandbox.style.pointerEvents = 'none';
+    sandbox.style.background = '#ffffff';
+    document.body.appendChild(sandbox);
+    sandbox.appendChild(contentClone);
+
+    try {
+      const displayEls = Array.from(contentClone.querySelectorAll('.katex-display'));
+      const inlineEls = Array.from(contentClone.querySelectorAll('.katex')).filter(el => !el.closest('.katex-display'));
+      const total = displayEls.length + inlineEls.length;
+      let done = 0;
+
+      // Display math
+      for (const el of displayEls) {
+        done++;
+        btn.innerText = `处理公式 ${done}/${total}...`;
+        await new Promise(r => requestAnimationFrame(() => setTimeout(r, 10)));
+        const tex = extractTexFromKatexElement(el);
+        const png = await texToPngViaMathJax(tex, { display: true, sandbox }) || await htmlElementToPng(el);
+        if (!png) continue;
+        const img = document.createElement('img');
+        img.setAttribute('src', png.data);
+        img.setAttribute('width', String(png.width));
+        img.setAttribute('height', String(png.height));
+        img.setAttribute('data-math', '1');
+        el.replaceWith(img);
+      }
+
+      // Inline math
+      for (const el of inlineEls) {
+        done++;
+        btn.innerText = `处理公式 ${done}/${total}...`;
+        await new Promise(r => requestAnimationFrame(() => setTimeout(r, 10)));
+        const tex = extractTexFromKatexElement(el);
+        const png = await texToPngViaMathJax(tex, { display: false, sandbox }) || await htmlElementToPng(el);
+        if (!png) continue;
+        const img = document.createElement('img');
+        img.setAttribute('src', png.data);
+        img.setAttribute('width', String(png.width));
+        img.setAttribute('height', String(png.height));
+        img.setAttribute('data-math', '1');
+        img.setAttribute('data-inline', '1');
+        el.replaceWith(img);
+      }
+    } finally {
+      // sandbox 会在 blocks 生成完后统一移除
+    }
+
     if (!window.docx) {
       throw new Error('docx 库未加载（请检查网络/CDN）。');
     }
@@ -420,6 +623,10 @@ async function exportWord() {
     await new Promise(r => setTimeout(r, 30));
 
     const blocks = await htmlElementToDocxBlocks(contentClone);
+
+    if (sandbox && sandbox.parentNode) {
+      sandbox.parentNode.removeChild(sandbox);
+    }
     if (!blocks.length) {
       blocks.push(new window.docx.Paragraph({ text: '' }));
     }
@@ -487,6 +694,85 @@ function guessImageType(dataUrl) {
   return undefined;
 }
 
+function inlineAllComputedStyles(sourceEl, targetEl) {
+  if (!sourceEl || !targetEl) return;
+  if (sourceEl.nodeType !== Node.ELEMENT_NODE || targetEl.nodeType !== Node.ELEMENT_NODE) return;
+
+  const style = window.getComputedStyle(sourceEl);
+  if (style) {
+    let cssText = '';
+    for (let i = 0; i < style.length; i++) {
+      const prop = style[i];
+      cssText += `${prop}:${style.getPropertyValue(prop)};`;
+    }
+    targetEl.setAttribute('style', cssText);
+  }
+
+  const srcChildren = Array.from(sourceEl.children || []);
+  const dstChildren = Array.from(targetEl.children || []);
+  for (let i = 0; i < srcChildren.length && i < dstChildren.length; i++) {
+    inlineAllComputedStyles(srcChildren[i], dstChildren[i]);
+  }
+}
+
+function htmlElementToPng(el, options = {}) {
+  const scale = Number.isFinite(options.scale) ? options.scale : 2;
+  const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 1200;
+
+  return new Promise((resolve) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return resolve(null);
+
+    const timeout = setTimeout(() => {
+      console.warn('HTML->PNG render timed out, skipping.');
+      resolve(null);
+    }, timeoutMs);
+
+    try {
+      const rect = el.getBoundingClientRect();
+      const width = Math.max(1, Math.ceil(rect.width || 1));
+      const height = Math.max(1, Math.ceil(rect.height || 1));
+
+      const clone = el.cloneNode(true);
+      inlineAllComputedStyles(el, clone);
+
+      const foreign = document.createElement('div');
+      foreign.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+      foreign.appendChild(clone);
+      const serialized = foreign.outerHTML;
+
+      const svg = `<?xml version="1.0" encoding="UTF-8"?>\n` +
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">` +
+        `<foreignObject x="0" y="0" width="100%" height="100%">${serialized}</foreignObject>` +
+        `</svg>`;
+
+      const svgUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+      const img = new Image();
+      img.onload = () => {
+        clearTimeout(timeout);
+        const canvas = document.createElement('canvas');
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.scale(scale, scale);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve({ data: canvas.toDataURL('image/png'), width, height });
+      };
+      img.onerror = (e) => {
+        clearTimeout(timeout);
+        console.error('HTML->PNG image load failed', e);
+        resolve(null);
+      };
+      img.src = svgUrl;
+    } catch (e) {
+      clearTimeout(timeout);
+      console.error('HTML->PNG conversion error', e);
+      resolve(null);
+    }
+  });
+}
+
 function splitTextToRuns(text, options = {}) {
   const { TextRun } = window.docx;
   const normalized = (text ?? '').replace(/\r\n/g, '\n');
@@ -498,6 +784,71 @@ function splitTextToRuns(text, options = {}) {
       runs.push(new TextRun({ break: 1 }));
     }
   });
+  return runs;
+}
+
+async function inlineNodeToDocxRunsAsync(node, inherited = {}) {
+  const { TextRun, ImageRun } = window.docx;
+  if (!node) return [];
+
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent ?? '';
+    return splitTextToRuns(text, inherited);
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) return [];
+
+  const tag = (node.tagName || '').toUpperCase();
+  if (tag === 'BR') return [new TextRun({ break: 1 })];
+
+  // KaTeX 的 MathML/annotation 里会带原始 TeX，必须跳过，否则会在 Word 里出现 \times 等源码
+  if (tag === 'MATH' || tag === 'SEMANTICS' || tag === 'ANNOTATION') return [];
+
+  if (tag === 'IMG') {
+    const src = node.getAttribute('src') || '';
+    const bytes = dataUrlToUint8Array(src);
+    if (!bytes) return [];
+
+    const natural = await getImageSizeFromDataUrl(src);
+    const widthAttr = parseInt(node.getAttribute('width') || '', 10);
+    const heightAttr = parseInt(node.getAttribute('height') || '', 10);
+    const naturalWidth = natural?.width || (Number.isFinite(widthAttr) ? widthAttr : 120);
+    const naturalHeight = natural?.height || (Number.isFinite(heightAttr) ? heightAttr : 24);
+
+    // Inline: constrain height for baseline alignment
+    const isMath = node.getAttribute('data-math') === '1';
+    const MAX_H = isMath ? 28 : 22;
+    const ratio = naturalHeight > 0 ? (naturalWidth / naturalHeight) : 5;
+    const targetHeight = Math.max(12, Math.min(MAX_H, naturalHeight));
+    const targetWidth = Math.max(16, Math.round(targetHeight * ratio));
+
+    const imageType = guessImageType(src);
+    return [new ImageRun({ data: bytes, transformation: { width: targetWidth, height: targetHeight }, type: imageType })];
+  }
+
+  const next = { ...inherited };
+  if (tag === 'STRONG' || tag === 'B') next.bold = true;
+  if (tag === 'EM' || tag === 'I') next.italics = true;
+  if (tag === 'S' || tag === 'DEL' || tag === 'STRIKE') next.strike = true;
+  if (tag === 'CODE') next.font = next.font || 'Courier New';
+
+  const runs = [];
+  const children = Array.from(node.childNodes || []);
+  for (const child of children) {
+    runs.push(...await inlineNodeToDocxRunsAsync(child, next));
+  }
+  return runs;
+}
+
+async function inlineContainerToDocxRunsAsync(container, inherited = {}) {
+  const { TextRun } = window.docx;
+  if (!container) return [new TextRun({ text: '' })];
+  const runs = [];
+  const children = Array.from(container.childNodes || []);
+  for (const child of children) {
+    runs.push(...await inlineNodeToDocxRunsAsync(child, inherited));
+  }
+  if (!runs.length) runs.push(new TextRun({ text: '' }));
   return runs;
 }
 
@@ -525,6 +876,7 @@ async function htmlElementToDocxBlocks(rootEl) {
         const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
         if (text) {
           blocks.push(new Paragraph({
+            alignment: AlignmentType.LEFT,
             children: [new window.docx.TextRun({ text })],
             spacing: { after: 120 },
           }));
@@ -543,18 +895,29 @@ async function htmlElementToDocxBlocks(rootEl) {
       if (/^H[1-6]$/.test(tag)) {
         const heading = headingLevelForTag(tag);
         blocks.push(new Paragraph({
-          text: node.textContent || '',
+          children: await inlineContainerToDocxRunsAsync(node),
           heading,
+          alignment: AlignmentType.LEFT,
           spacing: { after: 180 },
         }));
         continue;
       }
 
       if (tag === 'P' || tag === 'DIV') {
-        const text = (node.innerText || node.textContent || '').trim();
-        if (text) {
+        // 这里必须按“行内节点”生成 runs，否则会丢失 strong/em 等格式
+        const hasBlockChildren = Array.from(node.children || []).some(el => {
+          const t = (el.tagName || '').toUpperCase();
+          if (t === 'IMG') {
+            // 允许行内公式图片不强制拆成块级
+            return el.getAttribute('data-inline') !== '1';
+          }
+          return ['TABLE', 'PRE', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'].includes(t);
+        });
+
+        if (!hasBlockChildren) {
           blocks.push(new Paragraph({
-            children: splitTextToRuns(text),
+            alignment: AlignmentType.LEFT,
+            children: await inlineContainerToDocxRunsAsync(node),
             spacing: { after: 120 },
           }));
         } else {
@@ -568,6 +931,7 @@ async function htmlElementToDocxBlocks(rootEl) {
         const code = (node.innerText || node.textContent || '').replace(/^\n+|\n+$/g, '');
         if (code) {
           blocks.push(new Paragraph({
+            alignment: AlignmentType.LEFT,
             children: splitTextToRuns(code, { font: 'Courier New' }),
             spacing: { after: 180 },
           }));
@@ -580,11 +944,17 @@ async function htmlElementToDocxBlocks(rootEl) {
         const items = Array.from(node.children).filter(c => isElement(c) && c.tagName.toUpperCase() === 'LI');
         let idx = 1;
         for (const li of items) {
-          const text = (li.innerText || li.textContent || '').trim();
-          if (!text) continue;
+          const hasAnyText = (li.innerText || li.textContent || '').trim();
+          if (!hasAnyText) continue;
+
+          const prefixRuns = isOrdered
+            ? [new TextRun({ text: `${idx++}. ` })]
+            : [];
+
           blocks.push(new Paragraph({
-            text: isOrdered ? `${idx++}. ${text}` : text,
+            children: [...prefixRuns, ...await inlineContainerToDocxRunsAsync(li)],
             bullet: isOrdered ? undefined : { level: 0 },
+            alignment: AlignmentType.LEFT,
             spacing: { after: 60 },
           }));
         }
@@ -603,7 +973,8 @@ async function htmlElementToDocxBlocks(rootEl) {
           const naturalHeight = natural?.height || (Number.isFinite(heightAttr) ? heightAttr : 450);
 
           const MAX_WIDTH = 560;
-          const MIN_WIDTH = 120;
+          const isMath = node.getAttribute('data-math') === '1';
+          const MIN_WIDTH = isMath ? 1 : 120;
           let targetWidth = Number.isFinite(widthAttr) ? widthAttr : naturalWidth;
           targetWidth = Math.min(Math.max(targetWidth, MIN_WIDTH), MAX_WIDTH);
 
@@ -647,8 +1018,10 @@ async function htmlElementToDocxBlocks(rootEl) {
 
           for (let i = 0; i < tableColCount; i++) {
             const cellEl = cellEls[i];
-            const cellText = cellEl ? (cellEl.innerText || cellEl.textContent || '').trim() : '';
             const isHeader = cellEl ? (cellEl.tagName.toUpperCase() === 'TH') : false;
+            const cellRuns = cellEl
+              ? await inlineContainerToDocxRunsAsync(cellEl, isHeader ? { bold: true } : {})
+              : [new TextRun({ text: '' })];
 
             normalizedCells.push(new TableCell({
               width: { size: columnWidths[i], type: WidthType.DXA },
@@ -661,9 +1034,7 @@ async function htmlElementToDocxBlocks(rootEl) {
               children: [
                 new Paragraph({
                   alignment: isHeader ? AlignmentType.CENTER : AlignmentType.LEFT,
-                  children: isHeader
-                    ? [new TextRun({ text: cellText, bold: true })]
-                    : [new TextRun({ text: cellText })],
+                  children: cellRuns,
                   spacing: { after: 60 },
                 }),
               ],
