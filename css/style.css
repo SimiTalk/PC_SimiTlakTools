@@ -196,6 +196,136 @@ button:disabled {
   margin: 20px 0;
 }
 
+.drawio-diagram {
+  display: flex;
+  justify-content: center;
+  margin: 20px 0;
+}
+
+.drawio-wrap {
+  width: 100%;
+  max-width: 1100px;
+  border: 2px dashed #d0d7de;
+  border-radius: 14px;
+  padding: 12px;
+  background: #f8fafc;
+}
+
+.drawio-banner {
+  font-size: 14px;
+  color: #334155;
+  padding: 10px 12px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+
+.drawio-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 0 6px 0;
+}
+
+.drawio-btn {
+  padding: 6px 10px;
+  border: 1px solid #d0d7de;
+  background: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.drawio-btn:hover {
+  background: #f3f4f6;
+}
+
+.drawio-capture {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.drawio-frame {
+  display: inline-block;
+  background: #fff;
+  max-width: 100%;
+  overflow: auto;
+}
+
+.drawio-xml {
+  margin-top: 12px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+.drawio-xml-box {
+  position: relative;
+  margin-top: 10px;
+}
+
+.drawio-copy-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 6px 10px;
+  border: 1px solid #d0d7de;
+  background: #fff;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #111827;
+}
+
+.drawio-copy-btn:hover {
+  background: #f3f4f6;
+}
+
+.drawio-xml > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #334155;
+  user-select: none;
+}
+
+.drawio-xml-pre {
+  margin: 10px 0 0 0;
+  max-height: 280px;
+  overflow: auto;
+  background: #ffffff;
+  color: #111827;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.drawio-xml-pre code {
+  color: inherit;
+}
+
+.drawio-placeholder,
+.drawio-error {
+  font-size: 13px;
+  color: #666;
+  background: #f8f9fa;
+  border: 1px dashed #d0d7de;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.drawio-error {
+  color: #b42318;
+  border-color: #f2c0c0;
+  background: #fff5f5;
+}
+
 body.wide-mode .editor-pane {
   width: 0;
   opacity: 0;

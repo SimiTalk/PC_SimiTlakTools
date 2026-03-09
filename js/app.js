@@ -307,11 +307,85 @@ const render = () => {
     const className = block.className || '';
     const isMermaid = /(^|\s)language-mermaid(\s|$)/.test(className) || /(^|\s)lang-mermaid(\s|$)/.test(className);
 
+    const isDrawio = /(^|\s)language-drawio(\s|$)/.test(className)
+      || /(^|\s)lang-drawio(\s|$)/.test(className)
+      || /(^|\s)language-mxgraph(\s|$)/.test(className)
+      || /(^|\s)lang-mxgraph(\s|$)/.test(className)
+      || /(^|\s)language-draw\.io(\s|$)/.test(className)
+      || /(^|\s)lang-draw\.io(\s|$)/.test(className);
+
     if (isMermaid) {
       const div = document.createElement('div');
       div.classList.add('mermaid');
       div.textContent = block.textContent;
       block.parentElement.replaceWith(div);
+    } else if (isDrawio) {
+      const host = document.createElement('div');
+      host.classList.add('drawio-diagram');
+      host.setAttribute('data-drawio-rendered', '0');
+
+      // 用隐藏节点保存 XML，避免塞进 attribute 造成转义/长度问题
+      const source = document.createElement('script');
+      source.type = 'text/plain';
+      source.className = 'drawio-source';
+      source.textContent = block.textContent || '';
+      host.appendChild(source);
+
+      // 预览 UI：提示条 + 控件 + 图 + 源码折叠
+      const wrap = document.createElement('div');
+      wrap.className = 'drawio-wrap';
+
+      const banner = document.createElement('div');
+
+      const toolbar = document.createElement('div');
+      toolbar.className = 'drawio-toolbar';
+      toolbar.innerHTML = `
+        <button type="button" class="drawio-btn" data-action="zoom-out" title="缩小">-</button>
+        <button type="button" class="drawio-btn" data-action="zoom-in" title="放大">+</button>
+        <button type="button" class="drawio-btn" data-action="zoom-reset" title="重置">Reset</button>
+      `;
+
+      const capture = document.createElement('div');
+      capture.className = 'drawio-capture';
+      capture.innerHTML = '<div class="drawio-placeholder">draw.io 图渲染中...</div>';
+
+      const details = document.createElement('details');
+      details.className = 'drawio-xml';
+      const summary = document.createElement('summary');
+      summary.textContent = '查看 draw.io XML 内容';
+
+      const box = document.createElement('div');
+      box.className = 'drawio-xml-box';
+
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'drawio-copy-btn';
+      copyBtn.textContent = '复制';
+      copyBtn.setAttribute('data-action', 'copy-xml');
+
+      const pre = document.createElement('pre');
+      pre.className = 'drawio-xml-pre';
+      const code = document.createElement('code');
+      code.className = 'language-xml';
+      const escaped = (source.textContent || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+      code.innerHTML = escaped;
+      pre.appendChild(code);
+
+      box.appendChild(copyBtn);
+      box.appendChild(pre);
+      details.appendChild(summary);
+      details.appendChild(box);
+
+      wrap.appendChild(banner);
+      wrap.appendChild(toolbar);
+      wrap.appendChild(capture);
+      wrap.appendChild(details);
+      host.appendChild(wrap);
+
+      block.parentElement.replaceWith(host);
     } else {
       hljs.highlightElement(block);
     }
@@ -322,6 +396,15 @@ const render = () => {
   } catch (e) {
     console.error('Mermaid initialization error:', e);
   }
+
+  // draw.io：渲染 mxGraphModel（异步排队，避免影响当前渲染流畅度）
+  queueMicrotask(() => {
+    try {
+      renderDrawioDiagrams(preview);
+    } catch (e) {
+      console.error('draw.io render error:', e);
+    }
+  });
 
   // KaTeX：渲染 $...$ 与 $$...$$
   try {
@@ -340,6 +423,350 @@ const render = () => {
   }
 };
 
+function canRenderDrawio() {
+  return typeof window.mxGraph === 'function'
+    && typeof window.mxCodec === 'function'
+    && typeof window.mxUtils?.parseXml === 'function';
+}
+
+function normalizeDrawioXml(input) {
+  let xml = String(input || '');
+  xml = xml.replace(/^\uFEFF/, '').trim();
+
+  // 兜底：有人会把整个 XML 当成“HTML 片段”粘贴，导致根标签是 &lt;mxGraphModel ...
+  // 这里做“一次性”HTML 实体解码（非递归），避免把原本合法的 &lt;div&gt; 再解码成 <div>。
+  if (/^\s*&lt;\s*(mxgraphmodel|mxfile)\b/i.test(xml)) {
+    const ta = document.createElement('textarea');
+    ta.innerHTML = xml;
+    xml = ta.value.trim();
+  }
+
+  const escapeBareAmp = (s) => s.replace(
+    /&(?!(?:lt|gt|amp|quot|apos);|#\d+;|#x[0-9a-fA-F]+;)/g,
+    '&amp;'
+  );
+
+  const escapeForXmlAttr = (s) => {
+    // 对属性值进行 XML 合法化：裸 < / > / & 必须转义
+    return escapeBareAmp(String(s || ''))
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  };
+
+  // 修复 draw.io 常见粘贴问题：mxCell 的 value="<div>..."（未转义 <）会导致 XML parsererror
+  // 只处理 value 属性，避免误伤 style 等其他属性。
+  xml = xml.replace(/\bvalue\s*=\s*"([^"]*)"/g, (_m, v) => `value="${escapeForXmlAttr(v)}"`);
+  xml = xml.replace(/\bvalue\s*=\s*'([^']*)'/g, (_m, v) => `value='${escapeForXmlAttr(v)}'`);
+
+  return xml;
+}
+
+function parseXmlOrThrow(xml) {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(xml, 'text/xml');
+  const rootTag = (doc && doc.documentElement && doc.documentElement.tagName) ? doc.documentElement.tagName.toLowerCase() : '';
+  const hasParserError = rootTag === 'parsererror' || doc.getElementsByTagName('parsererror')?.length;
+
+  if (hasParserError) {
+    const msg = (doc.getElementsByTagName('parsererror')[0]?.textContent || '').trim();
+    const hint = 'XML 未通过解析（可能包含未转义的 & 字符或引号）。建议：从 draw.io 复制“mxGraphModel 原始 XML”，并用 ```drawio 代码块粘贴。';
+    const detail = msg ? `解析器信息：${msg}` : '';
+    throw new Error([hint, detail].filter(Boolean).join('\n'));
+  }
+
+  return doc;
+}
+
+function parseDrawioInputToMxGraphModelDocOrThrow(xml) {
+  const doc = parseXmlOrThrow(xml);
+  const rootTag = (doc && doc.documentElement && doc.documentElement.tagName) ? doc.documentElement.tagName.toLowerCase() : '';
+
+  if (rootTag === 'mxgraphmodel') return doc;
+
+  if (rootTag === 'mxfile') {
+    const diagram = doc.getElementsByTagName('diagram')?.[0];
+    const diagramText = (diagram?.textContent || '').trim();
+
+    // 仅支持未压缩的 diagram：内容直接是 <mxGraphModel>...</mxGraphModel>
+    if (diagramText.startsWith('<mxGraphModel') || diagramText.startsWith('<?xml')) {
+      const inner = normalizeDrawioXml(diagramText);
+      const innerDoc = parseXmlOrThrow(inner);
+      const innerRoot = innerDoc?.documentElement?.tagName?.toLowerCase?.() || '';
+      if (innerRoot === 'mxgraphmodel') return innerDoc;
+    }
+
+    throw new Error('检测到 mxfile（draw.io 文件级 XML）。当前仅支持未压缩的 <diagram> 内容为 <mxGraphModel> 的情况；压缩版 mxfile 需要解压，暂未支持。');
+  }
+
+  if (rootTag) {
+    throw new Error(`XML 根节点为 <${rootTag}>，当前仅支持 <mxGraphModel> 或 <mxfile>（未压缩）。`);
+  }
+
+  throw new Error('未检测到有效的 XML 根节点。');
+}
+
+function renderDrawioDiagrams(root) {
+  if (!root) return;
+  const nodes = Array.from(root.querySelectorAll('.drawio-diagram'));
+  if (!nodes.length) return;
+
+  nodes.forEach(node => {
+    const state = node.getAttribute('data-drawio-rendered');
+    if (state === '1' || state === 'rendering') return;
+    const xml = node.querySelector('.drawio-source')?.textContent
+      || node.getAttribute('data-drawio-xml')
+      || '';
+
+    if (!xml.trim()) {
+      node.innerHTML = '<div class="drawio-error">draw.io 图为空</div>';
+      node.setAttribute('data-drawio-rendered', '1');
+      return;
+    }
+
+    if (!canRenderDrawio()) {
+      node.innerHTML = '<div class="drawio-error">mxGraph 未加载（请检查网络/CDN）</div>';
+      node.setAttribute('data-drawio-rendered', '0');
+      return;
+    }
+
+    node.setAttribute('data-drawio-rendered', 'rendering');
+
+    const capture = node.querySelector('.drawio-capture');
+    if (!capture) {
+      node.innerHTML = '<div class="drawio-error">draw.io 预览容器缺失</div>';
+      node.setAttribute('data-drawio-rendered', '0');
+      return;
+    }
+
+    // 清理 capture 区，仅重建图容器（保留 banner/toolbar/details/source）
+    capture.innerHTML = '';
+    const frame = document.createElement('div');
+    frame.className = 'drawio-frame';
+    capture.appendChild(frame);
+
+    const container = document.createElement('div');
+    container.className = 'drawio-canvas';
+    frame.appendChild(container);
+
+    // mxGraph 需要节点在 DOM 中才能正确测量
+    const graph = new window.mxGraph(container);
+    graph.setEnabled(false);
+    graph.setConnectable(false);
+    graph.setPanning(false);
+    graph.setTooltips(false);
+    graph.setCellsSelectable(false);
+    graph.setGridEnabled(false);
+    graph.foldingEnabled = false;
+
+    // 关键：让 html=1 的 label 按 HTML 渲染（否则 <div> 会被当纯文本，导致宽度爆炸、整体被缩得很小）
+    graph.setHtmlLabels(true);
+    const baseIsHtmlLabel = graph.isHtmlLabel;
+    graph.isHtmlLabel = function (cell) {
+      try {
+        const style = this.getCurrentCellStyle(cell) || {};
+        const htmlFlag = style.html;
+        if (htmlFlag === 1 || htmlFlag === '1' || htmlFlag === true || htmlFlag === 'true') return true;
+      } catch { }
+      return baseIsHtmlLabel ? baseIsHtmlLabel.call(this, cell) : false;
+    };
+
+    // 较大图时按预览宽度缩放
+    const margin = 10;
+    const maxWidth = Math.max(320, Math.min(1000, frame.clientWidth || 840));
+
+    graph.getModel().beginUpdate();
+    try {
+      const normalized = normalizeDrawioXml(xml);
+
+      // 不直接用 mxUtils.parseXml：它遇到 parsererror 时后续 decode 会报 "a.push is not a function"
+      const doc = parseDrawioInputToMxGraphModelDocOrThrow(normalized);
+      const codec = new window.mxCodec(doc);
+      codec.decode(doc.documentElement, graph.getModel());
+    } catch (e) {
+      node.innerHTML = '<div class="drawio-error">draw.io XML 解析失败：' + String(e.message || e) + '</div>';
+      node.setAttribute('data-drawio-rendered', '0');
+      try { graph.destroy(); } catch { }
+      return;
+    } finally {
+      graph.getModel().endUpdate();
+    }
+
+    // 让布局稳定后再算 bounds/scale
+    requestAnimationFrame(() => {
+      try {
+        const bounds = graph.getGraphBounds();
+        const rawW = Math.max(1, Math.ceil(bounds.width + margin * 2));
+        const rawH = Math.max(1, Math.ceil(bounds.height + margin * 2));
+        const baseScale = rawW > maxWidth ? (maxWidth / rawW) : 1;
+        const zoom = Number(node.getAttribute('data-drawio-zoom') || '1') || 1;
+        const scale = baseScale * zoom;
+
+        graph.view.setTranslate(Math.round(-bounds.x + margin), Math.round(-bounds.y + margin));
+        graph.view.setScale(scale);
+        graph.sizeDidChange();
+
+        container.style.width = Math.ceil(rawW * scale) + 'px';
+        container.style.height = Math.ceil(rawH * scale) + 'px';
+
+        // 给内部 svg 加上响应式约束（不影响导出转 PNG）
+        const svg = container.querySelector('svg');
+        if (svg) {
+          svg.style.maxWidth = '100%';
+          svg.style.height = 'auto';
+          svg.style.display = 'block';
+        }
+
+        // 绑定缩放控件
+        node.__drawio = {
+          graph,
+          container,
+          frame,
+          margin,
+          bounds,
+          rawW,
+          rawH,
+          baseScale,
+          maxWidth
+        };
+
+        const toolbar = node.querySelector('.drawio-toolbar');
+        if (toolbar && !toolbar.__drawioBound) {
+          toolbar.__drawioBound = true;
+          toolbar.addEventListener('click', (ev) => {
+            const btn = ev.target?.closest?.('button[data-action]');
+            if (!btn) return;
+            const action = btn.getAttribute('data-action');
+            handleDrawioToolbarAction(node, action);
+          });
+        }
+
+        const copyBtn = node.querySelector('.drawio-copy-btn');
+        if (copyBtn && !copyBtn.__drawioBound) {
+          copyBtn.__drawioBound = true;
+          copyBtn.addEventListener('click', async () => {
+            await copyDrawioXmlToClipboard(node, copyBtn);
+          });
+        }
+      } catch (e) {
+        console.error('draw.io post-layout error:', e);
+      } finally {
+        node.setAttribute('data-drawio-rendered', '1');
+      }
+    });
+  });
+}
+
+async function copyDrawioXmlToClipboard(node, buttonEl) {
+  const xml = node?.querySelector?.('.drawio-source')?.textContent || '';
+  if (!xml.trim()) return;
+
+  const setBtnText = (text) => {
+    if (!buttonEl) return;
+    const original = buttonEl.getAttribute('data-original-text') || buttonEl.textContent || '复制';
+    buttonEl.setAttribute('data-original-text', original);
+    buttonEl.textContent = text;
+    clearTimeout(buttonEl.__resetTimer);
+    buttonEl.__resetTimer = setTimeout(() => {
+      buttonEl.textContent = original;
+    }, 900);
+  };
+
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(xml);
+      setBtnText('已复制');
+      return;
+    }
+  } catch {
+    // fallback below
+  }
+
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = xml;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-10000px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (ok) setBtnText('已复制');
+    else setBtnText('复制失败');
+  } catch {
+    setBtnText('复制失败');
+  }
+}
+
+function relayoutDrawio(node) {
+  const info = node && node.__drawio;
+  if (!info?.graph) return;
+
+  const { graph, bounds, rawW, rawH, margin } = info;
+  const frame = info.frame;
+  const maxWidth = Math.max(320, Math.min(1000, frame?.clientWidth || info.maxWidth || 840));
+  const baseScale = rawW > maxWidth ? (maxWidth / rawW) : 1;
+  info.baseScale = baseScale;
+  info.maxWidth = maxWidth;
+
+  const zoom = Number(node.getAttribute('data-drawio-zoom') || '1') || 1;
+  const scale = baseScale * zoom;
+
+  graph.view.setTranslate(Math.round(-bounds.x + margin), Math.round(-bounds.y + margin));
+  graph.view.setScale(scale);
+  graph.sizeDidChange();
+
+  if (info.container) {
+    info.container.style.width = Math.ceil(rawW * scale) + 'px';
+    info.container.style.height = Math.ceil(rawH * scale) + 'px';
+  }
+}
+
+function handleDrawioToolbarAction(node, action) {
+  if (!node) return;
+  const current = Number(node.getAttribute('data-drawio-zoom') || '1') || 1;
+  let next = current;
+
+  switch (action) {
+    case 'zoom-in':
+      next = Math.min(4, Math.round((current + 0.25) * 100) / 100);
+      break;
+    case 'zoom-out':
+      next = Math.max(0.25, Math.round((current - 0.25) * 100) / 100);
+      break;
+    case 'zoom-reset':
+      next = 1;
+      break;
+    case 'zoom-fit':
+      // fit 表现为：把 zoom 设为 1（baseScale 已按宽度 fit 过）
+      next = 1;
+      break;
+    default:
+      return;
+  }
+
+  node.setAttribute('data-drawio-zoom', String(next));
+  relayoutDrawio(node);
+}
+
+async function waitForDrawioRendered(root, { timeoutMs = 1800 } = {}) {
+  if (!root) return;
+
+  // 触发一次渲染尝试（如果还没开始）
+  try {
+    renderDrawioDiagrams(root);
+  } catch { }
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const pending = Array.from(root.querySelectorAll('.drawio-diagram'))
+      .some(el => el.getAttribute('data-drawio-rendered') !== '1');
+    if (!pending) return;
+    await new Promise(r => requestAnimationFrame(() => r()));
+  }
+}
+
 // 监听编辑器变化
 editor.on("change", () => {
   clearTimeout(timer);
@@ -354,6 +781,60 @@ render();
 function clearEditor() {
   if (confirm('确定要清空编辑器内容吗？')) {
     editor.setValue('');
+  }
+}
+
+function formatDateForFilename(d = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}${mm}${dd}_${hh}${mi}`;
+}
+
+function sanitizeFilename(name) {
+  const raw = String(name || '').trim();
+  const cleaned = raw
+    // macOS/Windows 不允许的字符
+    .replace(/[\\/:*?"<>|]/g, '-')
+    // 控制字符
+    .replace(/[\u0000-\u001F\u007F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || `markdown_${formatDateForFilename()}`;
+}
+
+function ensureMdExtension(name) {
+  const base = String(name || '').trim();
+  if (!base) return `markdown_${formatDateForFilename()}.md`;
+  return /\.md$/i.test(base) ? base : `${base}.md`;
+}
+
+function saveMarkdown() {
+  try {
+    const filename = 'markdown.md';
+    const content = editor?.getValue?.() ?? '';
+
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+
+    if (typeof window.saveAs === 'function') {
+      window.saveAs(blob, filename);
+      return;
+    }
+
+    // fallback：不依赖 FileSaver
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('保存失败：' + (e?.message || e));
   }
 }
 
@@ -530,16 +1011,57 @@ async function exportWord() {
 
   try {
     const previewEl = document.getElementById('preview');
-    const liveSvgs = previewEl.querySelectorAll('.mermaid svg');
-    const replacements = [];
+    // 防止 draw.io 图尚未渲染就导出导致丢图
+    btn.innerText = '等待图表渲染...';
+    await waitForDrawioRendered(previewEl);
 
-    for (let i = 0; i < liveSvgs.length; i++) {
-      btn.innerText = `处理图片 ${i + 1}/${liveSvgs.length}...`;
-      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 50)));
+    const mermaidSvgs = Array.from(previewEl.querySelectorAll('.mermaid svg'));
+    const drawioEls = Array.from(previewEl.querySelectorAll('.drawio-diagram'));
+    const mermaidReplacements = [];
+    const drawioReplacements = [];
 
-      const pngData = await svgToPng(liveSvgs[i]);
+    const totalImages = mermaidSvgs.length + drawioEls.length;
+    let doneImages = 0;
+
+    for (let i = 0; i < mermaidSvgs.length; i++) {
+      doneImages++;
+      btn.innerText = `处理图片 ${doneImages}/${totalImages}...`;
+      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 30)));
+
+      const pngData = await svgToPng(mermaidSvgs[i]);
       if (pngData) {
-        replacements.push({ index: i, ...pngData });
+        mermaidReplacements.push({ index: i, ...pngData });
+      }
+    }
+
+    for (let i = 0; i < drawioEls.length; i++) {
+      doneImages++;
+      btn.innerText = `处理图片 ${doneImages}/${totalImages}...`;
+      await new Promise(r => requestAnimationFrame(() => setTimeout(r, 30)));
+
+      // draw.io 同时包含 SVG（线框）+ HTML label（div）。
+      // foreignObject 方案可能出现“只截到文字，不截到 SVG”的情况，因此优先用 html2canvas。
+      // 截图目标：.drawio-canvas（尺寸由 relayoutDrawio 设置，紧凑且无滚动条）
+      const target = drawioEls[i].querySelector('.drawio-canvas')
+        || drawioEls[i].querySelector('.drawio-frame')
+        || drawioEls[i].querySelector('.drawio-capture')
+        || drawioEls[i];
+
+      let pngData = await domToPngViaHtml2Canvas(target, { scale: 2 });
+
+      if (!pngData) {
+        // fallback：至少把 SVG 主体导出
+        const svg = target.querySelector?.('svg') || drawioEls[i].querySelector?.('svg');
+        pngData = svg ? await svgToPng(svg) : null;
+      }
+
+      if (!pngData) {
+        // 最后兜底：旧方案
+        pngData = await htmlElementToPng(target, { scale: 2, timeoutMs: 2500 });
+      }
+
+      if (pngData) {
+        drawioReplacements.push({ index: i, ...pngData });
       }
     }
 
@@ -547,15 +1069,27 @@ async function exportWord() {
     await new Promise(r => setTimeout(r, 50));
 
     const contentClone = previewEl.cloneNode(true);
-    const cloneSvgs = contentClone.querySelectorAll('.mermaid svg');
 
-    replacements.forEach(item => {
-      if (cloneSvgs[item.index]) {
+    const cloneMermaidSvgs = contentClone.querySelectorAll('.mermaid svg');
+    mermaidReplacements.forEach(item => {
+      if (cloneMermaidSvgs[item.index]) {
         const img = document.createElement('img');
         img.src = item.data;
         img.width = item.width;
         if (item.height) img.height = item.height;
-        cloneSvgs[item.index].parentNode.replaceChild(img, cloneSvgs[item.index]);
+        cloneMermaidSvgs[item.index].parentNode.replaceChild(img, cloneMermaidSvgs[item.index]);
+      }
+    });
+
+    const cloneDrawioEls = contentClone.querySelectorAll('.drawio-diagram');
+    drawioReplacements.forEach(item => {
+      if (cloneDrawioEls[item.index]) {
+        const img = document.createElement('img');
+        img.src = item.data;
+        img.setAttribute('width', String(item.width));
+        if (item.height) img.setAttribute('height', String(item.height));
+        img.setAttribute('data-docx-block-image', '1');
+        cloneDrawioEls[item.index].replaceWith(img);
       }
     });
 
@@ -773,6 +1307,34 @@ function htmlElementToPng(el, options = {}) {
   });
 }
 
+async function domToPngViaHtml2Canvas(el, options = {}) {
+  const scale = Number.isFinite(options.scale) ? options.scale : 2;
+  if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+  if (typeof window.html2canvas !== 'function') return null;
+
+  try {
+    const canvas = await window.html2canvas(el, {
+      backgroundColor: '#ffffff',
+      scale,
+      useCORS: true,
+      logging: false,
+      removeContainer: true,
+      scrollX: 0,
+      scrollY: 0,
+      windowWidth: document.documentElement.clientWidth,
+      windowHeight: document.documentElement.clientHeight,
+    });
+
+    const rect = el.getBoundingClientRect();
+    const width = Math.max(1, Math.ceil(rect.width || canvas.width / scale || 1));
+    const height = Math.max(1, Math.ceil(rect.height || canvas.height / scale || 1));
+    return { data: canvas.toDataURL('image/png'), width, height };
+  } catch (e) {
+    console.error('html2canvas capture error:', e);
+    return null;
+  }
+}
+
 function splitTextToRuns(text, options = {}) {
   const { TextRun } = window.docx;
   const normalized = (text ?? '').replace(/\r\n/g, '\n');
@@ -972,9 +1534,11 @@ async function htmlElementToDocxBlocks(rootEl) {
           const naturalWidth = natural?.width || (Number.isFinite(widthAttr) ? widthAttr : 800);
           const naturalHeight = natural?.height || (Number.isFinite(heightAttr) ? heightAttr : 450);
 
-          const MAX_WIDTH = 560;
+          // 约等于文档可用宽度（考虑左右页边距）。
+          const MAX_WIDTH = 620;
           const isMath = node.getAttribute('data-math') === '1';
-          const MIN_WIDTH = isMath ? 1 : 120;
+          const isBlockImage = node.getAttribute('data-docx-block-image') === '1';
+          const MIN_WIDTH = isMath ? 1 : (isBlockImage ? 1 : 120);
           let targetWidth = Number.isFinite(widthAttr) ? widthAttr : naturalWidth;
           targetWidth = Math.min(Math.max(targetWidth, MIN_WIDTH), MAX_WIDTH);
 
