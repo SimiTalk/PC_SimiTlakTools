@@ -777,11 +777,89 @@ editor.on("change", () => {
 mermaid.initialize({ startOnLoad: false, theme: 'default' });
 render();
 
-// 清空编辑器功能
-function clearEditor() {
-  if (confirm('确定要清空编辑器内容吗？')) {
-    editor.setValue('');
+// 清空编辑器功能 - 使用自定义弹窗定位在按钮上方
+function clearEditor(event) {
+  // 如果已经有弹窗，不再重复创建
+  if (document.querySelector('.inline-confirm')) return;
+
+  // 获取点击的按钮元素（确保获取到 button，而不是内部的 SVG）
+  const button = event?.currentTarget?.closest?.('button') || event?.currentTarget || event?.target?.closest?.('button') || event?.target;
+  if (!button) {
+    console.error('No button found');
+    return;
   }
+
+  const btnRect = button.getBoundingClientRect();
+  console.log('Button rect:', { left: btnRect.left, top: btnRect.top, width: btnRect.width, height: btnRect.height });
+
+  // 创建弹窗
+  const popup = document.createElement('div');
+  popup.className = 'inline-confirm';
+  popup.innerHTML = `
+    <div class="confirm-text">确定要清空编辑器内容吗?</div>
+    <div class="confirm-buttons">
+      <button class="confirm-btn-no">取消</button>
+      <button class="confirm-btn-yes">确定</button>
+    </div>
+  `;
+
+  // 先添加到 DOM 才能获取尺寸
+  popup.style.visibility = 'hidden';
+  document.body.appendChild(popup);
+
+  const rect = popup.getBoundingClientRect();
+  const popupWidth = rect.width;
+  const popupHeight = rect.height;
+  console.log('Popup size:', { width: popupWidth, height: popupHeight });
+
+  // 计算位置：弹窗位置调整，使确认按钮覆盖原按钮
+  let left = btnRect.left + (btnRect.width / 2) - (popupWidth / 2) - 55;
+  let top = btnRect.bottom - popupHeight - 8;
+  console.log('Calculated position (before bounds check):', { left, top });
+
+  // 边界检查：确保不超出视口
+  if (left < 8) left = 8;
+  if (left + popupWidth > window.innerWidth - 8) {
+    left = window.innerWidth - popupWidth - 8;
+  }
+  // 如果上方空间不够，显示在按钮下方
+  if (top < -20) {
+    console.log('Not enough space above, showing below button');
+    top = btnRect.bottom + 8;
+  }
+
+  console.log('Final position:', { left, top });
+  popup.style.left = left + 'px';
+  popup.style.top = top + 'px';
+  popup.style.visibility = 'visible';
+
+  // 点击外部关闭
+  const closeOnOutside = (e) => {
+    if (!popup.contains(e.target)) {
+      cleanup();
+    }
+  };
+
+  // 清理函数
+  const cleanup = () => {
+    document.removeEventListener('click', closeOnOutside);
+    popup.remove();
+  };
+
+  // 绑定按钮事件
+  popup.querySelector('.confirm-btn-yes').addEventListener('click', () => {
+    editor.setValue('');
+    cleanup();
+  });
+
+  popup.querySelector('.confirm-btn-no').addEventListener('click', () => {
+    cleanup();
+  });
+
+  // 延迟绑定外部点击监听，避免立即触发
+  setTimeout(() => {
+    document.addEventListener('click', closeOnOutside);
+  }, 10);
 }
 
 function formatDateForFilename(d = new Date()) {
