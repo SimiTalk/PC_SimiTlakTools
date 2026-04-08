@@ -790,11 +790,17 @@ function clearEditor(event) {
   }
 
   const btnRect = button.getBoundingClientRect();
+  const buttonGap = 8;
+  const buttonRadius = parseFloat(getComputedStyle(button).borderRadius) || 10;
+  const buttonRowWidth = btnRect.width * 2 + buttonGap;
   console.log('Button rect:', { left: btnRect.left, top: btnRect.top, width: btnRect.width, height: btnRect.height });
 
   // 创建弹窗
   const popup = document.createElement('div');
   popup.className = 'inline-confirm';
+  popup.style.width = `${buttonRowWidth + 20}px`;
+  popup.style.minWidth = `${buttonRowWidth + 20}px`;
+  popup.style.borderRadius = `${buttonRadius + 2}px`;
   popup.innerHTML = `
     <div class="confirm-text">确定要清空编辑器内容吗?</div>
     <div class="confirm-buttons">
@@ -813,8 +819,8 @@ function clearEditor(event) {
   console.log('Popup size:', { width: popupWidth, height: popupHeight });
 
   // 计算位置：弹窗位置调整，使确认按钮覆盖原按钮
-  let left = btnRect.left + (btnRect.width / 2) - (popupWidth / 2) - 55;
-  let top = btnRect.bottom - popupHeight - 8;
+  let left = btnRect.left - btnRect.width - buttonGap - 10;
+  let top = btnRect.top - 45;
   console.log('Calculated position (before bounds check):', { left, top });
 
   // 边界检查：确保不超出视口

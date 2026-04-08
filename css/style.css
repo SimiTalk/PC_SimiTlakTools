@@ -380,13 +380,14 @@ body.wide-mode #exit-wide-btn {
   background: rgba(255, 255, 255, 0.98);
   border: none;
   border-radius: 12px;
-  padding: 16px 14px;
+  padding: 14px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.08);
   z-index: 1000;
   min-width: 205px;
   font-size: 14px;
   animation: confirmPop 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
   backdrop-filter: blur(8px);
+  box-sizing: border-box;
 }
 
 @keyframes confirmPop {
@@ -401,12 +402,14 @@ body.wide-mode #exit-wide-btn {
 }
 
 .inline-confirm .confirm-text {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   color: #1a1a2e;
   font-weight: 500;
   line-height: 1.2;
   position: relative;
   text-align: center;
+  white-space: nowrap;
+  margin-bottom: 10px;
 }
 
 .inline-confirm .confirm-text::before {
@@ -418,19 +421,22 @@ body.wide-mode #exit-wide-btn {
 
 .inline-confirm .confirm-buttons {
   display: flex;
-  justify-content: space-between;
-  width: 90%;
-  margin: 0 auto;
+  gap: 8px;
+  width: 100%;
+  margin: 0;
 }
 
 .inline-confirm .confirm-buttons button {
-  padding: 8px 24px;
+  flex: 1;
+  height: 36px;
+  padding: 0;
   font-size: 13px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: none;
   cursor: pointer;
   transition: all 0.2s ease;
   font-weight: 500;
+  box-sizing: border-box;
 }
 
 .inline-confirm .confirm-btn-yes {
