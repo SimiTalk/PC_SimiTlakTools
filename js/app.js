@@ -1,3 +1,91 @@
+let __dynamicScriptPromises = new Map();
+let __drawioLibPromise;
+
+function ensureScriptLoaded(src, testFn, errorMessage) {
+  if (typeof testFn === 'function' && testFn()) {
+    return Promise.resolve();
+  }
+
+  if (__dynamicScriptPromises.has(src)) {
+    return __dynamicScriptPromises.get(src);
+  }
+
+  const promise = new Promise((resolve, reject) => {
+    const existingScript = document.querySelector(`script[src="${src}"]`);
+
+    const handleLoad = () => {
+      if (typeof testFn !== 'function' || testFn()) {
+        resolve();
+      } else {
+        reject(new Error(errorMessage));
+      }
+    };
+
+    if (existingScript) {
+      existingScript.addEventListener('load', handleLoad, { once: true });
+      existingScript.addEventListener('error', () => reject(new Error(errorMessage)), { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = true;
+    script.onload = handleLoad;
+    script.onerror = () => reject(new Error(errorMessage));
+    document.head.appendChild(script);
+  }).catch((error) => {
+    __dynamicScriptPromises.delete(src);
+    throw error;
+  });
+
+  __dynamicScriptPromises.set(src, promise);
+  return promise;
+}
+
+async function ensureExportLibsLoaded() {
+  await ensureScriptLoaded(
+    'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js',
+    () => typeof window.html2canvas === 'function',
+    'html2canvas 加载失败（请检查网络/CDN）。'
+  );
+
+  await ensureScriptLoaded(
+    'https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js',
+    () => !!window.docx,
+    'docx 库加载失败（请检查网络/CDN）。'
+  );
+
+  await ensureScriptLoaded(
+    'https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js',
+    () => typeof window.saveAs === 'function',
+    'FileSaver 加载失败（请检查网络/CDN）。'
+  );
+}
+
+async function ensureDrawioLoaded() {
+  if (canRenderDrawio()) return;
+  if (__drawioLibPromise) return __drawioLibPromise;
+
+  window.mxBasePath = 'https://unpkg.com/mxgraph@4.2.2/javascript/src';
+  window.mxImageBasePath = 'https://unpkg.com/mxgraph@4.2.2/javascript/src/images';
+
+  __drawioLibPromise = ensureScriptLoaded(
+    'https://unpkg.com/mxgraph@4.2.2/javascript/mxClient.min.js',
+    () => canRenderDrawio(),
+    'mxGraph 加载失败（请检查网络/CDN）。'
+  ).catch((error) => {
+    __drawioLibPromise = null;
+    throw error;
+  });
+
+  return __drawioLibPromise;
+}
+
+function mayContainMath(source) {
+  if (!source) return false;
+  return /(\$\$[\s\S]+?\$\$|\$(?!\s)[^\n$]+?\$|\\\(|\\\)|\\\[|\\\])/.test(source);
+}
+
 // 初始化 Markdown 渲染器（markdown-it）和 CodeMirror 编辑器
 function createMarkdownRenderer() {
   if (!window.markdownit) {
@@ -295,12 +383,16 @@ sequenceDiagram
 // 渲染 Markdown 预览
 let timer;
 const render = () => {
-  const html = md.render(normalizeMarkdownSource(editor.getValue()));
+  const source = normalizeMarkdownSource(editor.getValue());
+  const html = md.render(source);
   const preview = document.getElementById('preview');
   preview.innerHTML = html;
 
   // 标题锚点：支持 [xxx](#某标题) 这类跳转
   ensureHeadingIds(preview);
+
+  let hasMermaid = false;
+  let hasDrawio = false;
 
   // Mermaid：将 ```mermaid 代码块替换成 <div class="mermaid">
   preview.querySelectorAll('pre code').forEach(block => {
@@ -315,11 +407,13 @@ const render = () => {
       || /(^|\s)lang-draw\.io(\s|$)/.test(className);
 
     if (isMermaid) {
+      hasMermaid = true;
       const div = document.createElement('div');
       div.classList.add('mermaid');
       div.textContent = block.textContent;
       block.parentElement.replaceWith(div);
     } else if (isDrawio) {
+      hasDrawio = true;
       const host = document.createElement('div');
       host.classList.add('drawio-diagram');
       host.setAttribute('data-drawio-rendered', '0');
@@ -391,35 +485,39 @@ const render = () => {
     }
   });
 
-  try {
-    mermaid.init(undefined, document.querySelectorAll('.mermaid'));
-  } catch (e) {
-    console.error('Mermaid initialization error:', e);
+  if (hasMermaid) {
+    try {
+      mermaid.init(undefined, preview.querySelectorAll('.mermaid'));
+    } catch (e) {
+      console.error('Mermaid initialization error:', e);
+    }
   }
 
   // draw.io：渲染 mxGraphModel（异步排队，避免影响当前渲染流畅度）
-  queueMicrotask(() => {
-    try {
-      renderDrawioDiagrams(preview);
-    } catch (e) {
-      console.error('draw.io render error:', e);
-    }
-  });
+  if (hasDrawio) {
+    queueMicrotask(() => {
+      renderDrawioDiagrams(preview).catch(e => {
+        console.error('draw.io render error:', e);
+      });
+    });
+  }
 
   // KaTeX：渲染 $...$ 与 $$...$$
-  try {
-    if (typeof window.renderMathInElement === 'function') {
-      window.renderMathInElement(preview, {
-        delimiters: [
-          { left: '$$', right: '$$', display: true },
-          { left: '$', right: '$', display: false }
-        ],
-        throwOnError: false,
-        ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
-      });
+  if (mayContainMath(source)) {
+    try {
+      if (typeof window.renderMathInElement === 'function') {
+        window.renderMathInElement(preview, {
+          delimiters: [
+            { left: '$$', right: '$$', display: true },
+            { left: '$', right: '$', display: false }
+          ],
+          throwOnError: false,
+          ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+        });
+      }
+    } catch (e) {
+      console.error('KaTeX render error:', e);
     }
-  } catch (e) {
-    console.error('KaTeX render error:', e);
   }
 };
 
@@ -505,14 +603,26 @@ function parseDrawioInputToMxGraphModelDocOrThrow(xml) {
   throw new Error('未检测到有效的 XML 根节点。');
 }
 
-function renderDrawioDiagrams(root) {
+async function renderDrawioDiagrams(root) {
   if (!root) return;
   const nodes = Array.from(root.querySelectorAll('.drawio-diagram'));
-  if (!nodes.length) return;
-
-  nodes.forEach(node => {
+  const pendingNodes = nodes.filter(node => {
     const state = node.getAttribute('data-drawio-rendered');
-    if (state === '1' || state === 'rendering') return;
+    return state !== '1' && state !== 'rendering';
+  });
+  if (!pendingNodes.length) return;
+
+  try {
+    await ensureDrawioLoaded();
+  } catch (e) {
+    pendingNodes.forEach(node => {
+      node.innerHTML = '<div class="drawio-error">mxGraph 未加载（请检查网络/CDN）</div>';
+      node.setAttribute('data-drawio-rendered', '0');
+    });
+    throw e;
+  }
+
+  pendingNodes.forEach(node => {
     const xml = node.querySelector('.drawio-source')?.textContent
       || node.getAttribute('data-drawio-xml')
       || '';
@@ -1094,6 +1204,7 @@ async function exportWord() {
   btn.disabled = true;
 
   try {
+    await ensureExportLibsLoaded();
     const previewEl = document.getElementById('preview');
     // 防止 draw.io 图尚未渲染就导出导致丢图
     btn.innerText = '等待图表渲染...';
