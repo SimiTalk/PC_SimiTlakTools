@@ -147,9 +147,103 @@ const editor = CodeMirror.fromTextArea(document.getElementById("code"), {
   lineWrapping: true
 });
 
+function normalizeLegacySequenceBody(body) {
+  const lines = String(body || '').split('\n');
+  const output = [];
+  let hasHeader = false;
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+
+    if (/^sequenceDiagram\b/i.test(line)) {
+      hasHeader = true;
+      output.push(line);
+      return;
+    }
+
+    const titleMatch = /^Title\s*:\s*(.+)$/i.exec(line);
+    if (titleMatch) {
+      output.push(`title ${titleMatch[1].trim()}`);
+      return;
+    }
+
+    const noteMatch = /^Note\s+(right of|left of|over)\s+(.+)$/i.exec(line);
+    if (noteMatch) {
+      output.push(`Note ${noteMatch[1]} ${noteMatch[2]}`);
+      return;
+    }
+
+    const participantMatch = /^participant\s+(.+)$/i.exec(line);
+    if (participantMatch) {
+      output.push(`participant ${participantMatch[1]}`);
+      return;
+    }
+
+    output.push(rawLine);
+  });
+
+  const normalized = output.join('\n').trim();
+  if (!normalized) return '';
+  return hasHeader ? normalized : `sequenceDiagram\n${normalized}`;
+}
+
+function normalizeLegacyFlowBody(body) {
+  const lines = String(body || '').split('\n');
+  const nodeLines = [];
+  const edgeLines = [];
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+
+    const nodeMatch = /^([A-Za-z0-9_]+)=>(start|end|operation|condition|subroutine|inputoutput):\s*(.+)$/.exec(line);
+    if (nodeMatch) {
+      const [, id, type, label] = nodeMatch;
+      const safeLabel = label.replace(/"/g, '&quot;');
+      const shape = type === 'start' ? `("${safeLabel}")`
+        : type === 'end' ? `("${safeLabel}")`
+          : type === 'operation' ? `["${safeLabel}"]`
+            : type === 'condition' ? `{"${safeLabel}"}`
+              : type === 'subroutine' ? `[["${safeLabel}"]]`
+                : `[/"${safeLabel}"/]`;
+      nodeLines.push(`  ${id}${shape}`);
+      return;
+    }
+
+    if (line.includes('->')) {
+      const parts = line
+        .split(/->/)
+        .map(part => part.replace(/\((yes|no|right|left|top|bottom)\)/gi, '').trim())
+        .filter(Boolean);
+
+      if (parts.length >= 2) {
+        for (let i = 0; i < parts.length - 1; i++) {
+          edgeLines.push(`  ${parts[i]} --> ${parts[i + 1]}`);
+        }
+      }
+    }
+  });
+
+  if (!nodeLines.length && !edgeLines.length) return '';
+  return ['flowchart TD', ...nodeLines, ...edgeLines].join('\n');
+}
+
+function normalizeLegacyDiagramSource(source) {
+  if (!source) return '';
+  return String(source).replace(/(^|\n)```(sequence|flow)\s*\n([\s\S]*?)\n```/g, (_match, prefix, type, body) => {
+    const normalizedBody = type === 'sequence'
+      ? normalizeLegacySequenceBody(body)
+      : normalizeLegacyFlowBody(body);
+
+    if (!normalizedBody) return _match;
+    return `${prefix}\n\`\`\`mermaid\n${normalizedBody}\n\`\`\``;
+  });
+}
+
 function normalizeMarkdownSource(source) {
   if (!source) return '';
-  const input = String(source);
+  const input = normalizeLegacyDiagramSource(String(source));
 
   const replaceOutsideBackticks = (line, replacer) => {
     // 保留行内代码：`...` 或 ``...`` 等
