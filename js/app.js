@@ -1136,9 +1136,21 @@ function toggleWideMode() {
     headerBtn.innerText = isWide ? "❌ 退出预览" : "👁 预览模式";
   }
 
-  // 如果退出了宽屏模式，刷新编辑器防止错位
+  const refreshEditorLayout = () => {
+    editor.refresh();
+    const cursor = editor.getCursor();
+    editor.setCursor(cursor);
+    editor.scrollIntoView(cursor, 80);
+  };
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      refreshEditorLayout();
+    });
+  });
+
   if (!isWide) {
-    setTimeout(() => editor.refresh(), 50);
+    setTimeout(refreshEditorLayout, 180);
   }
 }
 
