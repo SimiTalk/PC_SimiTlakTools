@@ -18,6 +18,7 @@ yarn-error.log*
 
 # Dependencies
 node_modules/
+.wrangler/
 
 # Build
 dist/
