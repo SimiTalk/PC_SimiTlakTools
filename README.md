@@ -23,14 +23,14 @@
 
 > 真正的一键按钮使用 **Cloudflare Workers Static Assets**，不是 Cloudflare Pages。Cloudflare 官方 Deploy to Cloudflare 按钮目前只支持 Workers 应用；按钮会自动完成仓库复制、Workers Builds 配置和首次部署。参考：[Deploy to Cloudflare buttons](https://developers.cloudflare.com/workers/configuration/deploy-button/) 与 [Workers Static Assets](https://developers.cloudflare.com/workers/static-assets/)。
 
-> 要让任何人都能使用此按钮，远端必须已经存在 `cfpage` 分支，并且源仓库必须是 Public。Cloudflare 官方按钮不支持向其他用户分享 Private Repository。
+> 本仓库已公开，默认分支为 `cfpage`；任何人都可以通过该按钮把项目导入自己的 Cloudflare 账号。Cloudflare 官方按钮不支持 Private Repository。
 
 ## 仍然使用 Cloudflare Pages
 
 Pages 版本已经部署在 <https://simimd.pages.dev/>。如果希望把项目部署成自己账号下的 Pages 项目，Cloudflare 当前最短流程仍然是 Fork → Pages Import：
 
 1. [![Fork this repository](https://img.shields.io/badge/1._Fork-Repository-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/SimiTalk/PC_SimiTlakTools/fork)
-2. 创建 Fork 时不要勾选 **Copy the main branch only**，确保 `cfpage` 分支也被复制。
+2. Fork 默认会复制当前默认分支 `cfpage`，保持 **Copy the cfpage branch only** 即可。
 3. [![Import into Cloudflare Pages](https://img.shields.io/badge/2._Import-Cloudflare%20Pages-F38020?style=for-the-badge&logo=cloudflare&logoColor=white)](https://dash.cloudflare.com/?to=/:account/pages/new/provider/github) 点击后登录自己的 Cloudflare 账号。
 4. 在 Pages 导入页选择自己 GitHub 账号下的仓库副本，并使用以下配置：
 
