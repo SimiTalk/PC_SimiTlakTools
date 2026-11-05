@@ -155,6 +155,43 @@ test('Node version settings satisfy the locked Cloudflare deployment tools', asy
   assert.match(readme, /Node\.js 22/);
 });
 
+test('deployment tooling uses a pinned stable release and patched transitive dependencies', async () => {
+  const [packageText, lockText] = await Promise.all([
+    readFile(path.join(projectRoot, 'package.json'), 'utf8'),
+    readFile(path.join(projectRoot, 'package-lock.json'), 'utf8'),
+  ]);
+  const packageJson = JSON.parse(packageText);
+  const lock = JSON.parse(lockText);
+  assert.match(packageJson.devDependencies.wrangler, /^4\.\d+\.\d+$/);
+
+  // Known fixes at the time of this upgrade; npm audit remains the live advisory check.
+  const minimumVersions = { undici: [7, 30, 1], sharp: [0, 35, 5] };
+  for (const [name, minimum] of Object.entries(minimumVersions)) {
+    const installed = Object.entries(lock.packages)
+      .filter(([entry]) => entry.endsWith(`node_modules/${name}`));
+    assert.ok(installed.length > 0, `${name} must be checked in the deployment dependency chain`);
+    for (const [entry, pkg] of installed) {
+      assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
+      const parts = pkg.version.split('.').map(Number);
+      const differing = parts.findIndex((part, index) => part !== minimum[index]);
+      assert.ok(differing === -1 || parts[differing] > minimum[differing], `${entry} is below the patched version`);
+      assert.equal(pkg.dev, true);
+    }
+  }
+});
+
+test('locked package downloads use official registry URLs and integrity hashes', async () => {
+  const lock = JSON.parse(await readFile(path.join(projectRoot, 'package-lock.json'), 'utf8'));
+  for (const [entry, pkg] of Object.entries(lock.packages)) {
+    if (!entry) continue;
+    assert.ok(pkg.resolved, `${entry} must have a locked download URL`);
+    const url = new URL(pkg.resolved);
+    assert.equal(url.origin, 'https://registry.npmjs.org', entry);
+    assert.equal(url.username + url.password + url.search + url.hash, '', entry);
+    assert.match(pkg.integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/, entry);
+  }
+});
+
 test('all local entry assets resolve under root and GitHub Pages project paths', async (t) => {
   const temporaryRoot = await mkdtemp(path.join(tmpdir(), 'simimd-paths-'));
   const outputDirectory = path.join(temporaryRoot, 'dist');
