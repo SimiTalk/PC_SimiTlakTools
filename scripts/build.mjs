@@ -6,10 +6,11 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const defaultProjectRoot = path.resolve(scriptDirectory, '..');
 
 const siteEntries = [
+  '.nojekyll',
   '_headers',
   '_redirects',
   'css',
-  'imgage',
+  'images',
   'index.html',
   'js',
 ];
@@ -48,5 +49,5 @@ const isCommandLineRun = process.argv[1]
 
 if (isCommandLineRun) {
   const copiedFiles = await buildSite();
-  console.log(`Cloudflare static bundle created in dist/ (${copiedFiles.join(', ')})`);
+  console.log(`Static site bundle created in dist/ (${copiedFiles.join(', ')})`);
 }
